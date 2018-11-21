@@ -86,8 +86,8 @@ public class Configurator {
      *
      * @param clazz is used to locate the properties @see
      * java.lang.Class#getResourceAsStream
-     * @param key
-     * @return
+     * @param key to be resolved
+     * @return the resolved value.
      */
     public Object getProperty(Class<?> clazz, Object key) {
         Object value = this.systemProperties.get(key);

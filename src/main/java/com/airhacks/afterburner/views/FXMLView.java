@@ -20,17 +20,23 @@ package com.airhacks.afterburner.views;
  * #L%
  */
 import com.airhacks.afterburner.injection.Injector;
+import com.airhacks.afterburner.injection.PresenterFactory;
 import java.io.IOException;
 import java.net.URL;
+import java.util.List;
 import java.util.MissingResourceException;
 import java.util.ResourceBundle;
 import static java.util.ResourceBundle.getBundle;
 import java.util.concurrent.CompletableFuture;
+import static java.util.concurrent.CompletableFuture.supplyAsync;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 import javafx.application.Platform;
 import javafx.beans.property.ObjectProperty;
 import javafx.beans.property.SimpleObjectProperty;
@@ -39,24 +45,24 @@ import javafx.collections.ObservableList;
 import javafx.fxml.FXMLLoader;
 import javafx.scene.Node;
 import javafx.scene.Parent;
+import javafx.scene.layout.StackPane;
+import javafx.util.Callback;
 
 /**
  * @author adam-bien.com
  */
-public abstract class FXMLView {
+public abstract class FXMLView extends StackPane {
 
-    public final static String DEFAULT_ENDING = "view";
+    public final static String DEFAULT_ENDING = "View";
     protected ObjectProperty<Object> presenterProperty;
     protected FXMLLoader fxmlLoader;
     protected String bundleName;
     protected ResourceBundle bundle;
     protected final Function<String, Object> injectionContext;
     protected URL resource;
-    protected final static Executor PARENT_CREATION_POOL = Executors.newCachedThreadPool(runnable -> {
-        Thread thread = Executors.defaultThreadFactory().newThread(runnable);
-        thread.setDaemon(true);
-        return thread;
-    });
+    protected static Executor FX_PLATFORM_EXECUTOR = Platform::runLater;
+
+    protected final static ExecutorService PARENT_CREATION_POOL = getExecutorService();
 
     /**
      * Constructs the view lazily (fxml is not loaded) with empty injection
@@ -74,25 +80,44 @@ public abstract class FXMLView {
      */
     public FXMLView(Function<String, Object> injectionContext) {
         this.injectionContext = injectionContext;
-        this.init(getClass(), getFXMLName());
+        this.init(getFXMLName());
     }
 
-    private void init(Class<?> clazz, final String conventionalName) {
+    private void init(final String conventionalName) {
         this.presenterProperty = new SimpleObjectProperty<>();
-        this.resource = clazz.getResource(conventionalName);
+        this.resource = getClass().getResource(conventionalName);
         this.bundleName = getBundleName();
         this.bundle = getResourceBundle(bundleName);
     }
 
     FXMLLoader loadSynchronously(final URL resource, ResourceBundle bundle, final String conventionalName) throws IllegalStateException {
         final FXMLLoader loader = new FXMLLoader(resource, bundle);
-        loader.setControllerFactory((Class<?> p) -> Injector.instantiatePresenter(p, this.injectionContext));
+        PresenterFactory factory = discover();
+        Callback<Class<?>, Object> controllerFactory = (Class<?> p) -> factory.instantiatePresenter(p, this.injectionContext);
+        loader.setControllerFactory(controllerFactory);
         try {
             loader.load();
         } catch (IOException ex) {
             throw new IllegalStateException("Cannot load " + conventionalName, ex);
         }
         return loader;
+    }
+
+    PresenterFactory discover() {
+        Iterable<PresenterFactory> discoveredFactories = PresenterFactory.discover();
+        List<PresenterFactory> factories = StreamSupport.stream(discoveredFactories.spliterator(), false).
+                collect(Collectors.toList());
+        if (factories.isEmpty()) {
+            return Injector::instantiatePresenter;
+        }
+
+        if (factories.size() == 1) {
+            return factories.get(0);
+        } else {
+            factories.forEach(System.err::println);
+            throw new IllegalStateException("More than one PresenterFactories discovered");
+        }
+
     }
 
     void initializeFXMLLoader() {
@@ -106,7 +131,7 @@ public abstract class FXMLView {
      * Initializes the view by loading the FXML (if not happened yet) and
      * returns the top Node (parent) specified in
      *
-     * @return
+     * @return the node loaded by FXMLLoader
      */
     public Parent getView() {
         this.initializeFXMLLoader();
@@ -123,19 +148,24 @@ public abstract class FXMLView {
      */
     public void getView(Consumer<Parent> consumer) {
         Supplier<Parent> supplier = this::getView;
-        Executor fxExecutor = Platform::runLater;
-        CompletableFuture.supplyAsync(supplier, fxExecutor).thenAccept(consumer);
+        supplyAsync(supplier, FX_PLATFORM_EXECUTOR).
+                thenAccept(consumer).
+                exceptionally(this::exceptionReporter);
     }
 
     /**
      * Creates the view asynchronously using an internal thread pool and passes
-     * the parent node withing the UI Thread.
+     * the parent node within the UI Thread.
      *
      *
      * @param consumer - an object interested in received the Parent as callback
      */
     public void getViewAsync(Consumer<Parent> consumer) {
-        PARENT_CREATION_POOL.execute(() -> getView(consumer));
+        Supplier<Parent> supplier = this::getView;
+        CompletableFuture.supplyAsync(supplier, PARENT_CREATION_POOL).
+                thenAcceptAsync(consumer, FX_PLATFORM_EXECUTOR).
+                exceptionally(this::exceptionReporter);
+
     }
 
     /**
@@ -163,7 +193,34 @@ public abstract class FXMLView {
     }
 
     String getStyleSheetName() {
-        return getConventionalName(".css");
+        return getResourceCamelOrLowerCase(false, ".css");
+    }
+
+    /**
+     *
+     * @return the name of the fxml file derived from the FXML view. e.g. The
+     * name for the AirhacksView is going to be airhacks.fxml.
+     */
+    final String getFXMLName() {
+        return getResourceCamelOrLowerCase(true, ".fxml");
+    }
+
+    String getResourceCamelOrLowerCase(boolean mandatory, String ending) {
+        String name = getConventionalName(true, ending);
+        URL found = getClass().getResource(name);
+        if (found != null) {
+            return name;
+        }
+        System.err.println("File: " + name + " not found, attempting with camel case");
+        name = getConventionalName(false, ending);
+        found = getClass().getResource(name);
+        if (mandatory && found == null) {
+            final String message = "Cannot load file " + name;
+            System.err.println(message);
+            System.err.println("Stopping initialization phase...");
+            throw new IllegalStateException(message);
+        }
+        return name;
     }
 
     /**
@@ -195,25 +252,31 @@ public abstract class FXMLView {
 
     /**
      *
+     * @param lowercase indicates whether the simple class name should be
+     * converted to lowercase of left unchanged
      * @param ending the suffix to append
      * @return the conventional name with stripped ending
      */
-    protected String getConventionalName(String ending) {
-        return getConventionalName() + ending;
+    protected String getConventionalName(boolean lowercase, String ending) {
+        return getConventionalName(lowercase) + ending;
     }
 
     /**
      *
-     * @return the name of the view without the "View" prefix in lowerCase. For
-     * AirhacksView just airhacks is going to be returned.
+     * @param lowercase indicates whether the simple class name should be
+     * @return the name of the view without the "View" prefix.
      */
-    protected String getConventionalName() {
-        String clazz = this.getClass().getSimpleName().toLowerCase();
-        return stripEnding(clazz);
+    protected String getConventionalName(boolean lowercase) {
+        final String clazzWithEnding = this.getClass().getSimpleName();
+        String clazz = stripEnding(clazzWithEnding);
+        if (lowercase) {
+            clazz = clazz.toLowerCase();
+        }
+        return clazz;
     }
 
     String getBundleName() {
-        String conventionalName = getConventionalName();
+        String conventionalName = getConventionalName(true);
         return this.getClass().getPackage().getName() + "." + conventionalName;
     }
 
@@ -223,15 +286,6 @@ public abstract class FXMLView {
         }
         int viewIndex = clazz.lastIndexOf(DEFAULT_ENDING);
         return clazz.substring(0, viewIndex);
-    }
-
-    /**
-     *
-     * @return the name of the fxml file derived from the FXML view. e.g. The
-     * name for the AirhacksView is going to be airhacks.fxml.
-     */
-    final String getFXMLName() {
-        return getConventionalName(".fxml");
     }
 
     public static ResourceBundle getResourceBundle(String name) {
@@ -248,6 +302,26 @@ public abstract class FXMLView {
      */
     public ResourceBundle getResourceBundle() {
         return this.bundle;
+    }
+
+    static ExecutorService getExecutorService() {
+        return Executors.newCachedThreadPool((r) -> {
+            Thread thread = Executors.defaultThreadFactory().newThread(r);
+            String name = thread.getName();
+            thread.setName("afterburner.fx-" + name);
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    /**
+     *
+     * @param t exception to report
+     * @return nothing
+     */
+    public Void exceptionReporter(Throwable t) {
+        System.err.println(t);
+        return null;
     }
 
 }
