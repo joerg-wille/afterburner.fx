@@ -111,8 +111,10 @@ public class Injector {
     public static <T> T instantiateModelOrService(Class<T> clazz) {
         T product = (T) modelsAndServices.get(clazz);
         if (product == null) {
-            product = injectAndInitialize((T) instanceSupplier.apply(clazz));
-            modelsAndServices.putIfAbsent(clazz, product);
+            product = injectAndInitialize((T)instanceSupplier.apply(clazz));
+            if (modelsAndServices.get(clazz) == null) {
+                modelsAndServices.put(clazz, product);
+            }
         }
         return clazz.cast(product);
     }
@@ -159,7 +161,7 @@ public class Injector {
         }
     }
 
-    static void injectIntoField(final Field field, final Object instance, final Object target) {
+	static void injectIntoField(final Field field, final Object instance, final Object target) {
         AccessController.doPrivileged((PrivilegedAction<?>) () -> {
             boolean wasAccessible = field.isAccessible();
             try {
@@ -211,12 +213,12 @@ public class Injector {
 
     public static void forgetAll() {
         Collection<Object> values = modelsAndServices.values();
-        values.stream().forEach((object) -> {
+        for (Object object : values) {
             destroy(object);
-        });
-        presenters.stream().forEach((object) -> {
+        }
+        for (Object object : presenters) {
             destroy(object);
-        });
+        }
         presenters.clear();
         modelsAndServices.clear();
         resetInstanceSupplier();

@@ -45,13 +45,12 @@ import javafx.collections.ObservableList;
 import javafx.fxml.FXMLLoader;
 import javafx.scene.Node;
 import javafx.scene.Parent;
-import javafx.scene.layout.StackPane;
 import javafx.util.Callback;
 
 /**
  * @author adam-bien.com
  */
-public abstract class FXMLView extends StackPane {
+public abstract class FXMLView {
 
     public final static String DEFAULT_ENDING = "View";
     protected ObjectProperty<Object> presenterProperty;
